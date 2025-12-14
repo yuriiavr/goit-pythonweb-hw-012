@@ -55,9 +55,9 @@ class Token(BaseModel):
 
 class RequestEmail(BaseModel):
     email: EmailStr
-    
-class RequestResetPassword(BaseModel):
-    email: EmailStr
 
 class ResetPassword(BaseModel):
     new_password: str = Field(min_length=6, max_length=255)
+    
+class UserRoleUpdate(BaseModel):
+    role: Role

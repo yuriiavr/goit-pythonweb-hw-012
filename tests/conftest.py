@@ -39,12 +39,16 @@ def session(engine, setup_db, TestingSessionLocal):
     connection.close()
 
 @pytest.fixture(scope="function")
-def client(session):
+def client(session, test_user):
     def override_get_db():
         yield session
 
+    async def override_get_current_user():
+        return test_user
+
     app.dependency_overrides[get_db] = override_get_db
-    
+    app.dependency_overrides[auth_service.get_current_user] = override_get_current_user
+
     with TestClient(app) as c:
         yield c
 
@@ -56,14 +60,9 @@ def test_user(session):
         id=1,
         username="testuser",
         email="test@example.com",
-        password=auth_service.get_password_hash("shortpass123"),
+        password=auth_service.get_password_hash("shortpassword"),
         confirmed=True,
-        role="admin" 
     )
     session.add(user)
     session.commit()
     return user
-
-@pytest.fixture
-def auth_token(test_user):
-    return auth_service.create_access_token(data={"sub": test_user.email})

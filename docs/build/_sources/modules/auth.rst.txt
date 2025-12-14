@@ -1,5 +1,5 @@
-auth Module
-===========
+Authentication
+==============
 
 .. automodule:: auth
    :members:
