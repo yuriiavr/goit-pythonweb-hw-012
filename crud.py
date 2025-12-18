@@ -51,6 +51,17 @@ def update_password(db: Session, user: models.User, new_password: str):
     return user
 
 def create_contact(db: Session, contact: schemas.ContactCreate, user_id: int):
+    """
+    Створює новий контакт для конкретного користувача.
+
+    Args:
+        db (Session): Сесія бази даних.
+        contact (ContactCreate): Схема з даними контакту.
+        user_id (int): ID власника контакту.
+
+    Returns:
+        Contact: Створений об'єкт контакту з БД.
+    """
     db_contact = models.Contact(**contact.model_dump(), user_id=user_id) 
     db.add(db_contact)
     db.commit()

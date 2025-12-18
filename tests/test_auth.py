@@ -159,3 +159,14 @@ async def test_get_current_user_cache_hit_unconfirmed(mock_get_redis, session: S
     assert excinfo.value.status_code == status.HTTP_401_UNAUTHORIZED
     assert excinfo.value.detail == "Could not validate credentials"
     mock_redis.get.assert_called_once()
+    
+def test_reset_token_logic():
+    email = "test@example.com"
+    token = auth_service.create_reset_token({"sub": email})
+    decoded_email = auth_service.decode_reset_token(token)
+    assert decoded_email == email
+
+def test_decode_reset_token_invalid():
+    with pytest.raises(HTTPException) as exc:
+        auth_service.decode_reset_token("not_a_valid_token")
+    assert exc.value.status_code == 401

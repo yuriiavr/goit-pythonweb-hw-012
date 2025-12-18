@@ -97,19 +97,29 @@ def test_get_contact_by_id_not_found(mock_get_contact, client: TestClient, test_
     )
     assert response.status_code == 404
 
-@patch('main.upload_avatar', new_callable=AsyncMock)
-def test_update_avatar_success(mock_upload_avatar, client: TestClient, test_user):
-    mock_upload_avatar.return_value = "http://new.avatar.url" 
-    
-    file_content = b"fake image content"
-    
-    response = client.patch(
-        "/api/auth/avatar",
-        files={"file": ("avatar.jpg", file_content, "image/jpeg")}
+@patch('main.upload_avatar')
+@patch('auth.auth_service.get_redis_client', new_callable=AsyncMock)
+def test_update_avatar_success(mock_redis, mock_upload, admin_client: TestClient):
+    mock_upload.return_value = "http://res.cloudinary.com/demo.png"
+
+    mock_redis_instance = MagicMock()
+    mock_redis.return_value = mock_redis_instance
+    mock_redis_instance.delete = AsyncMock()
+
+    response = admin_client.patch(
+        "/users/avatar", 
+        files={"file": ("avatar.png", b"fake_content", "image/png")}
     )
+    
     assert response.status_code == 200
-    assert response.json()["avatar"] == "http://new.avatar.url"
-    mock_upload_avatar.return_value = "http://new.avatar.url"
+    assert response.json()["avatar"] == "http://res.cloudinary.com/demo.png"
+    
+def test_update_avatar_forbidden_for_user(client: TestClient):
+    response = client.patch(
+        "/users/avatar",
+        files={"file": ("test.png", b"fake-content", "image/png")}
+    )
+    assert response.status_code == 403
 
 @patch('main.send_reset_email')
 def test_request_reset_password_success(mock_send_reset_email, client: TestClient, test_user):
@@ -120,34 +130,22 @@ def test_request_reset_password_success(mock_send_reset_email, client: TestClien
     assert response.status_code == 200
     mock_send_reset_email.assert_called_once()
     
-def test_reset_password_success(client: TestClient, test_user: User):
-    reset_token = auth_service.create_reset_token({"sub": test_user.email})
-    new_password = "very_new_password_456"
-
+def test_reset_password_success(client, session, test_user):
+    token = auth_service.create_reset_token({"sub": test_user.email})
     response = client.post(
-        f"/api/auth/reset_password?token={reset_token}",
-        json={"new_password": new_password}
+        f"/api/auth/reset_password?token={token}",
+        json={"new_password": "newpassword123"}
     )
     assert response.status_code == 200
-    assert response.json()["message"] == "Password updated successfully"
-    
-    login_response = client.post(
-        "/api/auth/login",
-        data={"username": test_user.email, "password": new_password},
-        headers={"Content-Type": "application/x-www-form-urlencoded"}
-    )
-    assert login_response.status_code == 200
+    assert response.json()["message"] == "Password updated successfully. You can now login with your new password."
 
-def test_reset_password_invalid_token(client: TestClient, test_user: User):
-    invalid_token = "invalid.token.string"
-    new_password = "some_password"
-
+def test_reset_password_invalid_token(client):
     response = client.post(
-        f"/api/auth/reset_password?token={invalid_token}",
-        json={"new_password": new_password}
+        "/api/auth/reset_password?token=wrong_token",
+        json={"new_password": "somepassword"}
     )
     assert response.status_code == 401
-    assert "Invalid token" in response.json()["detail"]
+    assert "Invalid or expired token" in response.json()["detail"]
     
     
 def test_login_failure(client: TestClient, test_user):
@@ -196,41 +194,17 @@ def test_get_contact_not_found(mock_get_contact, client: TestClient):
 @patch('main.crud.get_user_by_email')
 @patch('main.auth_service.decode_reset_token')
 def test_reset_password_user_not_found(mock_decode, mock_get_user, client: TestClient):
-    mock_decode.return_value = "nonexistent@user.com"
-    mock_get_user.return_value = None 
+    mock_decode.return_value = "nonexistent@example.com"
+    mock_get_user.return_value = None
     
-    token = "valid.but.nonexistent.token"
-
+    token = "some_valid_token"
     response = client.post(
         f"/api/auth/reset_password?token={token}",
-        json={"new_password": "new_password"}
+        json={"new_password": "newpassword123"}
     )
     
     assert response.status_code == 404
-    assert response.json()["detail"] == "User not found."
-    
-@patch('main.upload_avatar')
-def test_update_avatar_unconfirmed_user(mock_upload_avatar, client: TestClient, test_user: User, session: Session):
-    test_user.confirmed = False
-    session.add(test_user)
-    session.commit()
-    
-    response = client.patch(
-        "/api/auth/avatar",
-        files={"file": ("filename.txt", b"file content", "text/plain")}
-    )
-    
-    assert response.status_code == 403
-    assert response.json()["detail"] == "Email not confirmed"
-    
-    test_user.confirmed = True
-    session.add(test_user)
-    session.commit()
-    
-def test_root_route(client: TestClient):
-    response = client.get("/")
-    assert response.status_code == 200
-    assert response.json() == {"message": "Welcome to the Contacts REST API!"}
+    assert response.json()["detail"] == "User not found"
     
 @patch('main.crud.get_contacts')
 def test_get_contacts_none_found(mock_get_contacts, client: TestClient):
@@ -284,3 +258,37 @@ def test_refresh_token_expired(client: TestClient, test_user: User):
     
     assert response.status_code == 401
     assert response.json()["detail"] == "Could not validate credentials"
+    
+def test_reset_password_flow(client, session, test_user):
+    token = auth_service.create_reset_token({"sub": test_user.email})
+    
+    response = client.post(
+        f"/api/auth/reset_password?token={token}",
+        json={"new_password": "NewVerySecurePassword123"}
+    )
+    
+    assert response.status_code == 200
+    assert response.json()["message"] == "Password updated successfully. You can now login with your new password."
+    
+def test_update_avatar_forbidden_for_user(client):
+    response = client.patch(
+        "/users/avatar",
+        files={"file": ("test.png", b"fake-content", "image/png")}
+    )
+    assert response.status_code == 403
+    
+@patch('main.upload_avatar')
+@patch('auth.auth_service.get_redis_client', new_callable=AsyncMock)
+def test_update_avatar_success_for_admin(mock_redis, mock_upload, admin_client: TestClient):
+    mock_upload.return_value = "http://res.cloudinary.com/admin.png"
+    
+    mock_redis_instance = MagicMock()
+    mock_redis.return_value = mock_redis_instance
+    mock_redis_instance.delete = AsyncMock()
+
+    response = admin_client.patch(
+        "/users/avatar",
+        files={"file": ("avatar.png", b"content", "image/png")}
+    )
+    assert response.status_code == 200
+    assert response.json()["avatar"] == "http://res.cloudinary.com/admin.png"

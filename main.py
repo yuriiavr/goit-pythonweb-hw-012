@@ -48,6 +48,16 @@ async def startup():
 
 @app.post("/api/auth/signup", response_model=schemas.UserResponse, status_code=status.HTTP_201_CREATED, tags=["Auth"])
 async def signup(body: schemas.UserCreate, background_tasks: BackgroundTasks, request: Request, db: Session = Depends(get_db)):
+    """
+    Реєстрація нового користувача в системі.
+
+    :param body: Дані для створення користувача (email, username, password).
+    :param background_tasks: Фонове завдання для відправки листа підтвердження.
+    :param request: Об'єкт запиту для отримання base_url.
+    :param db: Сесія бази даних SQLAlchemy.
+    :return: Об'єкт створеного користувача.
+    :raises HTTPException: 409 Conflict, якщо email вже зареєстрований.
+    """
     user = crud.get_user_by_email(db, body.email)
     if user:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Account already exists")
@@ -135,33 +145,6 @@ async def request_reset_password(
     
     return {"message": "Якщо користувач існує, лист для скидання пароля буде надіслано."}
 
-
-@app.get("/api/auth/reset_password", status_code=status.HTTP_200_OK, tags=["Auth"]) 
-def reset_password(
-    token: str = Query(..., description="Токен для скидання пароля з листа"), 
-    db: Session = Depends(get_db)
-):
-    try:
-        email = auth_service.decode_reset_token(token) 
-    except HTTPException:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Недійсний або прострочений токен.")
-    except Exception:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Недійсний токен.")
-        
-    user = crud.get_user_by_email(db, email)
-    if user is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Користувача не знайдено.")
-
-    characters = string.ascii_letters + string.digits + string.punctuation
-    new_password = ''.join(secrets.choice(characters) for i in range(12))
-
-    crud.update_password(db, user, new_password)
-    
-    return {
-        "message": "Пароль успішно оновлено. Використовуйте цей тимчасовий пароль для входу.",
-        "temporary_password": new_password
-    }
-
 @app.get("/users/me", response_model=schemas.UserResponse, tags=["User"])
 def read_users_me(current_user: models.User = Depends(auth_service.get_current_user)):
     return current_user
@@ -170,9 +153,8 @@ def read_users_me(current_user: models.User = Depends(auth_service.get_current_u
 async def update_avatar(
     file: UploadFile = File(...), 
     db: Session = Depends(get_db), 
-    current_user: models.User = Depends(role_required(Role.admin)) 
+    current_user: models.User = Depends(role_required(Role.admin))
 ):
-    
     if not current_user.confirmed:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Email not confirmed")
         
@@ -279,25 +261,6 @@ def upcoming_birthdays(
     contacts = crud.get_upcoming_birthdays(db, user_id=current_user.id)
     return contacts
 
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
-    
-
-@app.patch("/api/auth/avatar", response_model=schemas.UserResponse, tags=["Auth"])
-async def update_avatar_route(
-    file: UploadFile = File(...), 
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(auth_service.get_current_user)
-):
-    if not current_user.confirmed:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Email not confirmed")
-        
-    avatar_url = await upload_avatar(file)
-    updated_user = crud.update_avatar(db, current_user, avatar_url)
-    
-    return updated_user
-
 @app.post("/api/auth/reset_password", status_code=status.HTTP_200_OK, tags=["Auth"]) 
 def reset_password(
     body: schemas.ResetPassword, 
@@ -307,14 +270,16 @@ def reset_password(
     try:
         email = auth_service.decode_reset_token(token)
     except HTTPException:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token or expired") 
-    except Exception:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token")
 
     user = crud.get_user_by_email(db, email)
     if user is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found.")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
 
-    crud.update_password(db, user, body.new_password) 
+    crud.update_password(db, user, body.new_password)
     
-    return { "message": "Password updated successfully"}
+    return {"message": "Password updated successfully. You can now login with your new password."}
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)

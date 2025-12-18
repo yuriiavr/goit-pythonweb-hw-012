@@ -5,7 +5,7 @@ from models import Base
 from main import app
 from fastapi.testclient import TestClient
 from database import get_db
-from models import User
+from models import User, Role
 from auth import auth_service
 
 @pytest.fixture(scope="session")
@@ -66,3 +66,35 @@ def test_user(session):
     session.add(user)
     session.commit()
     return user
+
+@pytest.fixture
+def admin_user(session):
+    user = session.query(User).filter_by(email="admin@example.com").first()
+    if not user:
+        user = User(
+            username="admin_boss",
+            email="admin@example.com",
+            password=auth_service.get_password_hash("adminpassword"),
+            confirmed=True,
+            role=Role.admin
+        )
+        session.add(user)
+        session.commit()
+        session.refresh(user)
+    return user
+
+@pytest.fixture
+def admin_client(session, admin_user):
+    def override_get_db():
+        yield session
+
+    async def override_get_current_user():
+        return admin_user
+
+    app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[auth_service.get_current_user] = override_get_current_user
+
+    with TestClient(app) as c:
+        yield c
+    
+    app.dependency_overrides.clear()
