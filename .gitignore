@@ -7,3 +7,8 @@ __pycache__
 .pytest_cache
 .venv
 tests/__pycache__
+docs/
+htmlcov/
+.coveragerc
+.gitattributes
+__init__.py

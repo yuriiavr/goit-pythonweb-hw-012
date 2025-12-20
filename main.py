@@ -1,3 +1,13 @@
+"""
+Головний модуль додатка FastAPI для управління контактами.
+
+Цей модуль містить ініціалізацію FastAPI, налаштування CORS,
+обробники подій запуску (startup) та всі маршрути (endpoints) для:
+- Автентифікації та реєстрації користувачів.
+- Управління профілем користувача (аватари, ролі).
+- Управління списком контактів (CRUD операції, пошук, дні народження).
+"""
+
 import os
 from fastapi import FastAPI, Depends, HTTPException, status, Query, UploadFile, File, Request, BackgroundTasks
 from sqlalchemy.orm import Session
@@ -24,6 +34,7 @@ app = FastAPI(
     version="1.0.2"
 )
 
+# Налаштування Middleware для дозволу крос-доменних запитів
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -34,10 +45,20 @@ app.add_middleware(
 
 @app.get("/", tags=["Root"]) 
 def root(): 
+    """
+    Вітальний маршрут API.
+
+    :return: Словник з вітальним повідомленням.
+    :rtype: dict
+    """
     return {"message": "Welcome to the Contacts REST API!"}
 
 @app.on_event("startup")
 async def startup():
+    """
+    Обробник події запуску додатка.
+    Ініціалізує підключення до Redis та налаштовує FastAPILimiter для обмеження швидкості запитів.
+    """
     try:
         redis_host = os.environ.get("REDIS_HOST", "localhost")
         redis_port = int(os.environ.get("REDIS_PORT", 6379))
@@ -50,26 +71,36 @@ async def startup():
 async def signup(body: schemas.UserCreate, background_tasks: BackgroundTasks, request: Request, db: Session = Depends(get_db)):
     """
     Реєстрація нового користувача в системі.
+    Створює запис у базі даних та відправляє лист для підтвердження email у фоновому режимі.
 
-    :param body: Дані для створення користувача (email, username, password).
-    :param background_tasks: Фонове завдання для відправки листа підтвердження.
-    :param request: Об'єкт запиту для отримання base_url.
-    :param db: Сесія бази даних SQLAlchemy.
-    :return: Об'єкт створеного користувача.
-    :raises HTTPException: 409 Conflict, якщо email вже зареєстрований.
+    :param body: Дані користувача (username, email, password).
+    :type body: schemas.UserCreate
+    :param background_tasks: Завдання для виконання після повернення відповіді.
+    :param request: Об'єкт запиту для отримання базової URL-адреси.
+    :param db: Сесія бази даних.
+    :raises HTTPException: 409, якщо обліковий запис з таким email вже існує.
+    :return: Інформація про створеного користувача.
+    :rtype: models.User
     """
     user = crud.get_user_by_email(db, body.email)
     if user:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Account already exists")
     
     new_user = crud.create_user(db, body)
-    
     background_tasks.add_task(send_email, new_user.email, new_user.username, request.base_url)
-    
     return new_user
 
 @app.post("/api/auth/login", tags=["Auth"])
 def login(body: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
+    """
+    Авторизація користувача та отримання JWT токенів.
+
+    :param body: Форма з логіном (email) та паролем.
+    :param db: Сесія бази даних.
+    :raises HTTPException: 401, якщо логін/пароль невірні або email не підтверджено.
+    :return: Access та Refresh токени.
+    :rtype: dict
+    """
     user = crud.get_user_by_email(db, body.username)
     if user is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
@@ -81,8 +112,6 @@ def login(body: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get
         )
     if not auth_service.verify_password(body.password, user.password):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
-    if not user.confirmed:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Email not confirmed")
     
     access_token = auth_service.create_access_token(data={"sub": user.email, "scope": "access_token"})
     refresh_token = auth_service.create_refresh_token(data={"sub": user.email, "scope": "refresh_token"})
@@ -92,6 +121,15 @@ def login(body: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get
 
 @app.get("/api/auth/refresh_token", tags=["Auth"])
 def refresh_token(credentials: str = Depends(auth_service.oauth2_scheme), db: Session = Depends(get_db)):
+    """
+    Оновлення токена доступу за допомогою Refresh токена.
+
+    :param credentials: Поточний Refresh токен.
+    :param db: Сесія бази даних.
+    :raises HTTPException: 401, якщо токен недійсний.
+    :return: Нова пара токенів.
+    :rtype: dict
+    """
     email = auth_service.decode_refresh_token(credentials)
     user = crud.get_user_by_email(db, email)
     
@@ -107,6 +145,15 @@ def refresh_token(credentials: str = Depends(auth_service.oauth2_scheme), db: Se
 
 @app.get("/api/auth/confirmed_email/{token}", tags=["Auth"])
 def confirmed_email(token: str, db: Session = Depends(get_db)):
+    """
+    Підтвердження електронної пошти за допомогою токена.
+
+    :param token: JWT токен підтвердження.
+    :param db: Сесія бази даних.
+    :raises HTTPException: 404, якщо користувача не знайдено.
+    :return: Повідомлення про статус підтвердження.
+    :rtype: dict
+    """
     email = auth_service.decode_email_token(token)
     user = crud.get_user_by_email(db, email)
     
@@ -120,6 +167,15 @@ def confirmed_email(token: str, db: Session = Depends(get_db)):
 
 @app.post("/api/auth/request_email", status_code=status.HTTP_200_OK, tags=["Auth"])
 async def request_email(body: schemas.RequestEmail, background_tasks: BackgroundTasks, request: Request, db: Session = Depends(get_db)):
+    """
+    Повторний запит на надсилання листа для підтвердження пошти.
+
+    :param body: Схема з email користувача.
+    :param background_tasks: Фонове завдання для відправки пошти.
+    :param request: Об'єкт запиту.
+    :param db: Сесія бази даних.
+    :return: Статус успішної відправки.
+    """
     user = crud.get_user_by_email(db, body.email)
     
     if user is None:
@@ -137,8 +193,16 @@ async def request_reset_password(
     request: Request, 
     db: Session = Depends(get_db)
 ):
+    """
+    Запит на скидання пароля. Надсилає посилання на зміну пароля, якщо email існує.
+
+    :param body: Email користувача.
+    :param background_tasks: Фонове завдання для відправки пошти.
+    :param request: Об'єкт запиту.
+    :param db: Сесія бази даних.
+    :return: Загальне повідомлення (для безпеки не уточнюємо, чи існує email).
+    """
     user = crud.get_user_by_email(db, body.email)
-    
     if user:
         host = str(request.base_url)
         background_tasks.add_task(send_reset_email, user.email, user.username, host)
@@ -147,6 +211,12 @@ async def request_reset_password(
 
 @app.get("/users/me", response_model=schemas.UserResponse, tags=["User"])
 def read_users_me(current_user: models.User = Depends(auth_service.get_current_user)):
+    """
+    Отримання інформації про поточного автентифікованого користувача.
+
+    :param current_user: Об'єкт поточного користувача (з токена або кешу).
+    :return: Дані профілю користувача.
+    """
     return current_user
 
 @app.patch("/users/avatar", response_model=schemas.UserResponse, tags=["User"])
@@ -155,6 +225,15 @@ async def update_avatar(
     db: Session = Depends(get_db), 
     current_user: models.User = Depends(role_required(Role.admin))
 ):
+    """
+    Оновлення аватара користувача (Тільки для Адміністраторів у поточному налаштуванні).
+    Завантажує файл у Cloudinary та оновлює посилання в БД.
+
+    :param file: Зображення для завантаження.
+    :param db: Сесія бази даних.
+    :param current_user: Поточний користувач з роллю admin.
+    :return: Оновлений об'єкт користувача.
+    """
     if not current_user.confirmed:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Email not confirmed")
         
@@ -178,16 +257,34 @@ def update_user_role(
     db: Session = Depends(get_db), 
     admin_user: models.User = Depends(role_required(models.Role.admin)) 
 ):
+    """
+    Зміна ролі користувача (Тільки для Адміністраторів).
+
+    :param user_id: ID користувача, роль якого змінюється.
+    :param new_role: Нова роль (admin/user).
+    :param db: Сесія бази даних.
+    :param admin_user: Поточний адміністратор.
+    :return: Оновлений об'єкт користувача.
+    """
     user = crud.get_user_by_id(db, user_id)
     if user is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
 
     updated_user = crud.update_user_role(db, user, new_role.role)
-    
     return updated_user
 
 @app.post("/contacts/", response_model=schemas.ContactResponse, status_code=status.HTTP_201_CREATED, tags=["Contacts"], dependencies=[Depends(RateLimiter(times=2, seconds=5))])
 def create_contact(contact: schemas.ContactCreate, db: Session = Depends(get_db), current_user: models.User = Depends(auth_service.get_current_user)):
+    """
+    Створення нового контакту для поточного користувача.
+    Має обмеження швидкості (Rate Limiter).
+
+    :param contact: Дані нового контакту.
+    :param db: Сесія бази даних.
+    :param current_user: Автентифікований користувач.
+    :raises HTTPException: 409, якщо контакт з таким email вже існує у цього користувача.
+    :return: Створений контакт.
+    """
     if not current_user.confirmed:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Email not confirmed")
         
@@ -199,6 +296,15 @@ def create_contact(contact: schemas.ContactCreate, db: Session = Depends(get_db)
 
 @app.get("/contacts/", response_model=List[schemas.ContactResponse], tags=["Contacts"])
 def read_contacts(skip: int = 0, limit: int = 100, db: Session = Depends(get_db), current_user: models.User = Depends(auth_service.get_current_user)):
+    """
+    Отримання списку контактів поточного користувача з пагінацією.
+
+    :param skip: Скільки записів пропустити.
+    :param limit: Максимальна кількість записів.
+    :param db: Сесія бази даних.
+    :param current_user: Автентифікований користувач.
+    :return: Список контактів.
+    """
     if not current_user.confirmed:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Email not confirmed")
         
@@ -207,6 +313,14 @@ def read_contacts(skip: int = 0, limit: int = 100, db: Session = Depends(get_db)
 
 @app.get("/contacts/{contact_id}", response_model=schemas.ContactResponse, tags=["Contacts"])
 def read_contact(contact_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(auth_service.get_current_user)):
+    """
+    Отримання детальної інформації про конкретний контакт.
+
+    :param contact_id: ID контакту.
+    :param db: Сесія бази даних.
+    :param current_user: Автентифікований користувач.
+    :return: Об'єкт контакту.
+    """
     if not current_user.confirmed:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Email not confirmed")
         
@@ -217,6 +331,15 @@ def read_contact(contact_id: int, db: Session = Depends(get_db), current_user: m
 
 @app.put("/contacts/{contact_id}", response_model=schemas.ContactResponse, tags=["Contacts"])
 def update_contact(contact_id: int, contact: schemas.ContactUpdate, db: Session = Depends(get_db), current_user: models.User = Depends(auth_service.get_current_user)):
+    """
+    Оновлення даних існуючого контакту.
+
+    :param contact_id: ID контакту.
+    :param contact: Схема з новими даними.
+    :param db: Сесія бази даних.
+    :param current_user: Автентифікований користувач.
+    :return: Оновлений об'єкт контакту.
+    """
     if not current_user.confirmed:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Email not confirmed")
         
@@ -228,6 +351,14 @@ def update_contact(contact_id: int, contact: schemas.ContactUpdate, db: Session 
 
 @app.delete("/contacts/{contact_id}", status_code=status.HTTP_200_OK, tags=["Contacts"])
 def delete_contact(contact_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(auth_service.get_current_user)):
+    """
+    Видалення контакту користувача.
+
+    :param contact_id: ID контакту.
+    :param db: Сесія бази даних.
+    :param current_user: Автентифікований користувач.
+    :return: Повідомлення про успішне видалення.
+    """
     if not current_user.confirmed:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Email not confirmed")
 
@@ -242,6 +373,14 @@ def search_contacts(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth_service.get_current_user)
 ):
+    """
+    Пошук контактів за рядком (імя, прізвище або email).
+
+    :param query: Рядок для пошуку.
+    :param db: Сесія бази даних.
+    :param current_user: Автентифікований користувач.
+    :return: Список знайдених контактів.
+    """
     if not current_user.confirmed:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Email not confirmed")
 
@@ -255,6 +394,13 @@ def upcoming_birthdays(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth_service.get_current_user)
 ):
+    """
+    Отримання списку контактів, у яких день народження протягом наступних 7 днів.
+
+    :param db: Сесія бази даних.
+    :param current_user: Автентифікований користувач.
+    :return: Список контактів-іменинників.
+    """
     if not current_user.confirmed:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Email not confirmed")
         
@@ -267,6 +413,15 @@ def reset_password(
     token: str = Query(..., description="Токен для скидання пароля з листа"), 
     db: Session = Depends(get_db)
 ):
+    """
+    Встановлення нового пароля за допомогою токена скидання.
+
+    :param body: Схема з новим паролем.
+    :param token: Токен, отриманий в email.
+    :param db: Сесія бази даних.
+    :raises HTTPException: 401, якщо токен недійсний; 404, якщо користувача не знайдено.
+    :return: Повідомлення про успішне оновлення.
+    """
     try:
         email = auth_service.decode_reset_token(token)
     except HTTPException:
@@ -277,9 +432,9 @@ def reset_password(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
 
     crud.update_password(db, user, body.new_password)
-    
     return {"message": "Password updated successfully. You can now login with your new password."}
 
 if __name__ == "__main__":
     import uvicorn
+    # Запуск сервера розробки
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)

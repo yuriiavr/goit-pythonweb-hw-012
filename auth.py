@@ -1,3 +1,7 @@
+"""
+Модуль для забезпечення автентифікації та авторизації користувачів.
+Містить клас Auth для роботи з JWT-токенами та функцію role_required для перевірки прав доступу.
+"""
 import os
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
@@ -14,6 +18,10 @@ from database import get_db
 import crud
 
 class Auth:
+    """
+    Клас Auth надає методи для хешування паролів, створення та декодування JWT-токенів,
+    а також отримання поточного користувача з інтеграцією Redis для кешування.
+    """
     pwd_context = CryptContext(schemes=["argon2"], deprecated="auto")
     SECRET_KEY = os.environ.get("JWT_SECRET_KEY", "your_secret_key")
     ALGORITHM = os.environ.get("JWT_ALGORITHM", "HS256")
@@ -21,18 +29,45 @@ class Auth:
 
     @staticmethod
     async def get_redis_client() -> Redis:
+        """
+        Створює та повертає клієнта Redis на основі змінних середовища.
+
+        :return: Об'єкт Redis клієнта.
+        :rtype: redis.asyncio.Redis
+        """
         redis_host = os.environ.get("REDIS_HOST", "localhost")
         redis_port = int(os.environ.get("REDIS_PORT", 6379))
         r = await Redis(host=redis_host, port=redis_port, db=0)
         return r
 
     def verify_password(self, plain_password: str, hashed_password: str) -> bool:
+        """
+        Перевіряє, чи відповідає відкритий пароль його захешованій версії.
+
+        :param plain_password: Пароль у відкритому вигляді.
+        :param hashed_password: Захешований пароль з бази даних.
+        :return: True, якщо паролі збігаються, інакше False.
+        """
         return self.pwd_context.verify(plain_password, hashed_password)
 
     def get_password_hash(self, password: str) -> str:
+        """
+        Генерує хеш для відкритого пароля.
+
+        :param password: Пароль для хешування.
+        :return: Захешований рядок.
+        """
         return self.pwd_context.hash(password)
 
     def create_token(self, data: dict, token_type: str, expires_delta: Optional[float] = None) -> str:
+        """
+        Універсальний метод для створення JWT-токенів різних типів.
+
+        :param data: Дані, які будуть включені в payload токена.
+        :param token_type: Тип токена (access_token, refresh_token, email_token, reset_token).
+        :param expires_delta: Необов'язковий час життя токена в секундах.
+        :return: Закодований JWT токен.
+        """
         to_encode = data.copy()
         if expires_delta:
             expire = datetime.utcnow() + timedelta(seconds=expires_delta)
@@ -41,8 +76,6 @@ class Auth:
                 expire = datetime.utcnow() + timedelta(minutes=15)
             elif token_type == "refresh_token":
                 expire = datetime.utcnow() + timedelta(days=7)
-            elif token_type in ["email_token", "reset_token"]:
-                expire = datetime.utcnow() + timedelta(minutes=15)
             else:
                 expire = datetime.utcnow() + timedelta(minutes=15)
                 
@@ -51,18 +84,30 @@ class Auth:
         return encoded_jwt
 
     def create_access_token(self, data: dict, expires_delta: Optional[float] = None) -> str:
+        """Створює токен доступу."""
         return self.create_token(data, "access_token", expires_delta)
 
     def create_refresh_token(self, data: dict, expires_delta: Optional[float] = None) -> str:
+        """Створює токен оновлення."""
         return self.create_token(data, "refresh_token", expires_delta)
         
     def create_email_token(self, data: dict, expires_delta: Optional[float] = None) -> str:
+        """Створює токен для підтвердження пошти."""
         return self.create_token(data, "email_token", expires_delta)
 
     def create_reset_token(self, data: dict, expires_delta: Optional[float] = None) -> str:
+        """Створює токен для скидання пароля."""
         return self.create_token(data, "reset_token", expires_delta)
 
     def decode_token(self, token: str, scopes: List[str]) -> str:
+        """
+        Декодує JWT токен та перевіряє його тип (scope).
+
+        :param token: JWT токен.
+        :param scopes: Список дозволених типів токенів.
+        :raises HTTPException 401: Якщо токен недійсний або має невірний scope.
+        :return: Email користувача, вилучений з токена.
+        """
         credentials_exception = HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Could not validate credentials",
@@ -80,15 +125,27 @@ class Auth:
             raise credentials_exception
 
     def decode_refresh_token(self, refresh_token: str) -> str:
+        """Декодує токен оновлення."""
         return self.decode_token(refresh_token, ["refresh_token"])
 
     def decode_email_token(self, token: str) -> str:
+        """Декодує токен підтвердження пошти."""
         return self.decode_token(token, ["email_token"])
 
     def decode_reset_token(self, token: str) -> str:
+        """Декодує токен скидання пароля."""
         return self.decode_token(token, ["reset_token"])
 
     async def get_current_user(self, token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)) -> User:
+        """
+        Отримує поточного користувача за токеном доступу. 
+        Використовує Redis для кешування даних про користувача.
+
+        :param token: JWT токен доступу.
+        :param db: Сесія бази даних.
+        :raises HTTPException 401: Якщо токен недійсний, користувач не знайдений або пошта не підтверджена.
+        :return: Об'єкт користувача з бази даних.
+        """
         credentials_exception = HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Could not validate credentials",
@@ -101,7 +158,6 @@ class Auth:
         cached_user_json = await redis_client.get(f"user:{email}")
 
         if cached_user_json:
-            user_data = json.loads(cached_user_json)
             user = crud.get_user_by_email(db, email) 
             if user is None:
                 raise credentials_exception
@@ -125,10 +181,8 @@ class Auth:
             )
 
         user_data = {c.name: getattr(user, c.name) for c in user.__table__.columns}
-        
         if 'created_at' in user_data and user_data['created_at'] is not None:
              user_data['created_at'] = user_data['created_at'].isoformat()
-             
         user_data['role'] = user_data['role'].value
         await redis_client.set(f"user:{email}", json.dumps(user_data), ex=3600)
 
@@ -137,6 +191,12 @@ class Auth:
 auth_service = Auth()
 
 def role_required(required_role: Role):
+    """
+    Декоратор для перевірки ролі користувача перед виконанням запиту.
+
+    :param required_role: Необхідна роль (наприклад, Role.admin).
+    :return: Функція-обгортка для FastAPI Depends.
+    """
     def wrapper(current_user: User = Depends(auth_service.get_current_user)) -> User:
         if current_user.role != required_role:
             raise HTTPException(

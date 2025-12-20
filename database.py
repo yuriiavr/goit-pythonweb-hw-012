@@ -1,3 +1,7 @@
+"""
+Модуль для налаштування підключення до бази даних SQLAlchemy.
+Містить конфігурацію двигуна (engine) та фабрику сесій.
+"""
 from sqlalchemy import create_engine
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
@@ -23,6 +27,13 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
 def get_db():
+    """
+    Функція-генератор для отримання сесії бази даних.
+    Використовується як залежність (Dependency Injection) у маршрутах FastAPI.
+
+    :yield: Об'єкт сесії SQLAlchemy :class:`sqlalchemy.orm.Session`.
+    :finally: Закриває сесію після завершення запиту.
+    """
     db = SessionLocal()
     try:
         yield db
